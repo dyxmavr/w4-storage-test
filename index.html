@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>W4 storage test</title>
+<style>
+  body { font: 18px/1.4 system-ui, -apple-system, sans-serif; margin: 16px; background: #fff; color: #111; }
+  h1 { font-size: 22px; margin: 0 0 12px; }
+  .id { font: bold 44px ui-monospace, Menlo, monospace; letter-spacing: 3px; margin: 4px 0 8px; }
+  .verdict { font-weight: 600; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; }
+  .new { background: #fff3cd; } .kept { background: #d1f2d9; }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: 7px 4px; border-bottom: 1px solid #ddd; vertical-align: top; }
+  td:first-child { color: #555; width: 42%; }
+  .ok { color: #0a6b1f; font-weight: 600; } .bad { color: #b00020; font-weight: 600; }
+  button { font-size: 18px; padding: 10px 14px; margin-top: 16px; }
+  small { color: #555; word-break: break-all; display: block; margin-top: 16px; }
+</style>
+</head>
+<body>
+<h1>W4 storage test</h1>
+<div>Device ID</div>
+<div class="id" id="id">…</div>
+<div class="verdict" id="verdict">Checking…</div>
+<table id="t"></table>
+<button id="clear">Clear and start over</button>
+<small id="ua"></small>
+<script>
+(async () => {
+  const KEY = 'w4-test';
+  const now = new Date();
+  const rows = [];
+  const add = (k, v, cls) => rows.push([k, v, cls || '']);
+  const fmt = (iso) => iso ? new Date(iso).toLocaleString() : '-';
+  const ago = (iso) => {
+    if (!iso) return '';
+    const h = (now - new Date(iso)) / 36e5;
+    return h < 1 ? ` (${Math.round(h * 60)} min ago)` : ` (${h.toFixed(1)} h ago)`;
+  };
+
+  const ua = navigator.userAgent;
+  const browser =
+    /MicroMessenger/i.test(ua) ? 'WeChat in-app' :
+    /WhatsApp/i.test(ua) ? 'WhatsApp in-app' :
+    /FBAN|FBAV|Instagram/i.test(ua) ? 'Facebook/Instagram in-app' :
+    /CriOS/i.test(ua) ? 'Chrome (iOS)' :
+    /EdgiOS|EdgA/i.test(ua) ? 'Edge' :
+    /SamsungBrowser/i.test(ua) ? 'Samsung Internet' :
+    /Android/i.test(ua) && /Chrome/i.test(ua) ? 'Chrome (Android) or a WebView' :
+    /iPhone|iPad/i.test(ua) && /Safari/i.test(ua) ? 'Safari (iOS)' :
+    /iPhone|iPad/i.test(ua) ? 'iOS in-app view' : 'other';
+
+  // 1. localStorage — what the proposed design would use.
+  let saved = null, lsOk = true;
+  try { saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { lsOk = false; }
+
+  // 2. IndexedDB — the other script storage option.
+  const idb = (mode, value) => new Promise((resolve) => {
+    let req;
+    try { req = indexedDB.open('w4-test', 1); } catch { return resolve({ error: true }); }
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onerror = () => resolve({ error: true });
+    req.onsuccess = () => {
+      try {
+        const store = req.result.transaction('kv', mode === 'get' ? 'readonly' : 'readwrite').objectStore('kv');
+        const r = mode === 'get' ? store.get('state') : store.put(value, 'state');
+        r.onsuccess = () => resolve({ value: r.result });
+        r.onerror = () => resolve({ error: true });
+      } catch { resolve({ error: true }); }
+    };
+  });
+  const idbBefore = await idb('get');
+
+  // 3. A first-party cookie — what a server-side device token would use.
+  const cookieBefore = (document.cookie.match(/(?:^|; )w4id=([^;]+)/) || [])[1] || null;
+
+  const isNew = !saved;
+  const state = saved || { id: Math.random().toString(36).slice(2, 8).toUpperCase(), first: now.toISOString(), visits: 0 };
+  const lastVisit = state.last;
+  state.visits += 1;
+  state.last = now.toISOString();
+  try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { lsOk = false; }
+  const idbWrite = await idb('put', state);
+  document.cookie = `w4id=${state.id}; Max-Age=${60 * 60 * 24 * 30}; Path=/; SameSite=Lax; Secure`;
+
+  let persisted = 'unknown';
+  try { if (navigator.storage && navigator.storage.persisted) persisted = (await navigator.storage.persisted()) ? 'yes' : 'no'; } catch {}
+
+  document.getElementById('id').textContent = state.id;
+  const v = document.getElementById('verdict');
+  if (isNew) {
+    v.className = 'verdict new';
+    v.textContent = 'NEW: nothing was saved here before.';
+  } else {
+    v.className = 'verdict kept';
+    v.textContent = `REMEMBERED: visit #${state.visits}, last visit ${fmt(lastVisit)}${ago(lastVisit)}`;
+  }
+
+  add('Browser', browser);
+  add('First seen', fmt(state.first) + ago(state.first));
+  add('Visits', String(state.visits));
+  add('localStorage', !lsOk ? 'BLOCKED' : isNew ? 'empty before this visit' : 'kept', !lsOk || isNew ? 'bad' : 'ok');
+  add('IndexedDB', idbBefore.error || idbWrite.error ? 'BLOCKED'
+    : idbBefore.value && idbBefore.value.id === state.id ? 'kept'
+    : idbBefore.value ? `different ID (${idbBefore.value.id})` : 'empty before this visit',
+    idbBefore.value && idbBefore.value.id === state.id ? 'ok' : 'bad');
+  add('Cookie', cookieBefore === state.id ? 'kept'
+    : cookieBefore ? `different ID (${cookieBefore})` : 'empty before this visit',
+    cookieBefore === state.id ? 'ok' : 'bad');
+  add('Persistent storage', persisted);
+
+  document.getElementById('t').innerHTML = '';
+  for (const [k, val, cls] of rows) {
+    const tr = document.createElement('tr');
+    const a = document.createElement('td'); a.textContent = k;
+    const b = document.createElement('td'); b.textContent = val; if (cls) b.className = cls;
+    tr.append(a, b);
+    document.getElementById('t').append(tr);
+  }
+  document.getElementById('ua').textContent = ua;
+
+  document.getElementById('clear').onclick = async () => {
+    try { localStorage.removeItem(KEY); } catch {}
+    try { indexedDB.deleteDatabase('w4-test'); } catch {}
+    document.cookie = 'w4id=; Max-Age=0; Path=/; SameSite=Lax; Secure';
+    location.reload();
+  };
+})();
+</script>
+</body>
+</html>
